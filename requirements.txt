@@ -5,3 +5,4 @@ torch==2.6.0+cpu
 transformers==4.48.3
 sentencepiece==0.2.0
 jinja2==3.1.5
+protobuf==4.25.6
