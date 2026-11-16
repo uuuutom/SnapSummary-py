@@ -81,6 +81,13 @@ from fastapi.responses import HTMLResponse
 
 import torch
 import re
+import logging
+
+
+# Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 
 # Initialize FastAPI
 app = FastAPI(
@@ -89,20 +96,29 @@ app = FastAPI(
     version="1.0"
 )
 
-# Device selection
-device = torch.device(
-    "cuda" if torch.cuda.is_available() else "cpu"
-)
+
+# Device configuration
+device = torch.device("cpu")
+
+# Limit CPU threads to reduce resource usage
+torch.set_num_threads(1)
+
 
 # Model path
 MODEL_PATH = "./Artifacts"
 
+
 # Load tokenizer
+logger.info("Loading tokenizer...")
+
 tokenizer = AutoTokenizer.from_pretrained(
     MODEL_PATH
 )
 
+
 # Load model
+logger.info("Loading summarization model...")
+
 model = AutoModelForSeq2SeqLM.from_pretrained(
     MODEL_PATH
 )
@@ -110,19 +126,28 @@ model = AutoModelForSeq2SeqLM.from_pretrained(
 model.to(device)
 model.eval()
 
+logger.info("Model loaded successfully!")
+
+
 # HTML templates
 templates = Jinja2Templates(directory=".")
+
 
 # Input validation
 class DialogueInput(BaseModel):
     dialogue: str = Field(min_length=1)
 
 
-# Text cleaning
+# Text cleaning function
 def clean_data(text: str) -> str:
 
+    # Remove line breaks
     text = re.sub(r"\r\n|\n|\r", " ", text)
+
+    # Remove HTML tags
     text = re.sub(r"<.*?>", " ", text)
+
+    # Remove extra spaces
     text = re.sub(r"\s+", " ", text)
 
     return text.strip().lower()
@@ -131,19 +156,23 @@ def clean_data(text: str) -> str:
 # Summarization function
 def summarize_dialogue(dialogue: str) -> str:
 
+    # Clean input text
     dialogue = clean_data(dialogue)
 
     if not dialogue:
         raise ValueError("Please enter some text.")
 
-    # Tokenization
+    # Tokenize input
     inputs = tokenizer(
         dialogue,
-        padding="max_length",
+        padding=True,
         max_length=512,
         truncation=True,
         return_tensors="pt"
-    ).to(device)
+    )
+
+    # Move input to CPU
+    inputs = inputs.to(device)
 
     # Generate summary
     with torch.inference_mode():
@@ -151,12 +180,12 @@ def summarize_dialogue(dialogue: str) -> str:
         outputs = model.generate(
             input_ids=inputs["input_ids"],
             attention_mask=inputs["attention_mask"],
-            max_length=150,
-            num_beams=4,
-            early_stopping=True
+            max_new_tokens=100,
+            num_beams=1,
+            do_sample=False
         )
 
-    # Decode summary
+    # Decode generated tokens
     summary = tokenizer.decode(
         outputs[0],
         skip_special_tokens=True
@@ -169,11 +198,31 @@ def summarize_dialogue(dialogue: str) -> str:
 @app.post("/summarize/")
 def summarize(dialogue_input: DialogueInput):
 
-    summary = summarize_dialogue(
-        dialogue_input.dialogue
-    )
+    try:
 
-    return {"summary": summary}
+        summary = summarize_dialogue(
+            dialogue_input.dialogue
+        )
+
+        return {
+            "summary": summary
+        }
+
+    except ValueError as e:
+
+        raise HTTPException(
+            status_code=400,
+            detail=str(e)
+        )
+
+    except Exception as e:
+
+        logger.exception("Summarization failed")
+
+        raise HTTPException(
+            status_code=500,
+            detail="An error occurred while generating the summary."
+        )
 
 
 # Home page
@@ -183,5 +232,17 @@ async def home(request: Request):
     return templates.TemplateResponse(
         request=request,
         name="index.html",
-        context={"request": request}
+        context={
+            "request": request
+        }
     )
+
+
+# Health check
+@app.get("/health")
+def health_check():
+
+    return {
+        "status": "Server is running",
+        "model_loaded": model is not None
+    }
